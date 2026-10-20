@@ -1,3 +1,4 @@
+import hmac
 import os
 import re
 import time
@@ -35,7 +36,7 @@ CONFIG = {
 }
 
 st.set_page_config(
-    page_title="AdhivAI✨",
+    page_title="AdhivAI",
     page_icon=":material/auto_awesome:",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -97,7 +98,7 @@ st.markdown(
         color: #292449;
     }
 
-    .knova-brand {
+    .adhiv-brand {
         align-items: center;
         color: #292449;
         display: flex;
@@ -107,7 +108,7 @@ st.markdown(
         letter-spacing: -0.03em;
     }
 
-    .knova-brand-icon {
+    .adhiv-brand-icon {
         align-items: center;
         background: #efedff;
         border-radius: 0.7rem;
@@ -119,7 +120,7 @@ st.markdown(
         width: 2.1rem;
     }
 
-    .knova-eyebrow {
+    .adhiv-eyebrow {
         color: #6a5bc2;
         font-size: 0.72rem;
         font-weight: 700;
@@ -147,10 +148,44 @@ st.markdown(
         margin-top: 0.4rem;
     }
 
+    .st-key-welcome-panel {
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid #e1deef;
+        border-radius: 1rem;
+        padding: 1rem 1.1rem;
+    }
+
+    .st-key-example_prompt_0 button,
+    .st-key-example_prompt_1 button,
+    .st-key-example_prompt_general button {
+        background: #ffffff;
+        border: 1px solid #ded9f2;
+        color: #332b62;
+        justify-content: flex-start;
+        min-height: 3.2rem;
+        text-align: left;
+        white-space: normal;
+    }
+
+    .st-key-example_prompt_0 button:hover,
+    .st-key-example_prompt_1 button:hover,
+    .st-key-example_prompt_general button:hover {
+        background: #f2f0ff;
+        border-color: #8172dc;
+        color: #292449;
+    }
+
     .stButton > button {
         border-radius: 0.7rem;
         font-weight: 600;
         min-height: 2.65rem;
+    }
+
+    .stButton > button:focus-visible,
+    [data-testid="stChatInput"] textarea:focus-visible,
+    input:focus-visible {
+        outline: 3px solid #6a5bc2 !important;
+        outline-offset: 2px;
     }
 
     .stButton > button[kind="primary"],
@@ -196,13 +231,36 @@ st.markdown(
         color: #ffffff;
     }
 
-    .knova-footer {
+    .adhiv-footer {
         border-top: 1px solid #cbd4e1;
         color: #3c4559;
         font-size: 0.78rem;
         line-height: 1.65;
         margin-top: 1.5rem;
         padding-top: 1rem;
+    }
+
+    .adhiv-footer-title {
+        color: #292449;
+        font-size: 0.82rem;
+        font-weight: 700;
+    }
+
+    .adhiv-footer-stack {
+        color: #514d63;
+        margin-top: 0.2rem;
+    }
+
+    .adhiv-footer-signature {
+        color: #292449;
+        font-size: 0.84rem;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        margin-top: 0.35rem;
+    }
+
+    .adhiv-footer-signature-name {
+        color: #292449;
     }
 
     [data-testid="stChatInput"] [data-baseweb="textarea"] {
@@ -238,6 +296,34 @@ st.markdown(
             padding-right: 1rem;
         }
     }
+
+    @media (max-width: 640px) {
+        .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 3.5rem;
+        }
+
+        .adhiv-hero {
+            margin-bottom: 1rem;
+        }
+
+        .adhiv-hero-subtitle {
+            font-size: 0.92rem;
+        }
+
+        .st-key-welcome-panel {
+            padding: 0.8rem;
+        }
+
+        .stButton > button {
+            min-height: 2.9rem;
+            white-space: normal;
+        }
+
+        [data-testid="stChatInput"] textarea {
+            font-size: 16px;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -257,6 +343,10 @@ def _initialize_session_state() -> None:
         "chain_error": None,
         "upload_notice": None,
         "upload_errors": [],
+        "document_uploader_version": 0,
+        "admin_authenticated": False,
+        "admin_login_error": None,
+        "pending_document_deletion": None,
         "active_model_name": CONFIG["model_name"],
         "active_temperature": min(max(CONFIG["llm_temperature"], 0.0), 2.0),
         "active_top_k": max(CONFIG["top_k"], 1),
@@ -275,6 +365,31 @@ def _safe_error(exc: Exception, secret: str | None = None) -> str:
         detail = detail.replace(secret, "[redacted]")
     detail = detail[:500]
     return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def _configured_admin_password() -> str | None:
+    password = os.getenv("ADHIVAI_ADMIN_PASSWORD")
+    if password:
+        return password
+    try:
+        password = st.secrets["ADHIVAI_ADMIN_PASSWORD"]
+    except (FileNotFoundError, KeyError):
+        return None
+    return password if isinstance(password, str) and password else None
+
+
+def _authenticate_admin() -> None:
+    expected_password = _configured_admin_password()
+    entered_password = st.session_state.get("admin_password_input", "")
+    if expected_password and hmac.compare_digest(
+        entered_password, expected_password
+    ):
+        st.session_state.admin_authenticated = True
+        st.session_state.admin_login_error = None
+    else:
+        st.session_state.admin_authenticated = False
+        st.session_state.admin_login_error = "The owner password is incorrect."
+    st.session_state.admin_password_input = ""
 
 
 def _list_documents(folder: str) -> tuple[list[dict], str | None]:
@@ -351,6 +466,22 @@ def _save_uploaded_files(
     return saved, unchanged, errors
 
 
+def _delete_document_file(filename: str, folder: str) -> tuple[bool, str | None]:
+    if not filename:
+        return False, "No file name was provided for deletion."
+
+    target_path = os.path.join(folder, Path(filename).name)
+    if not os.path.isfile(target_path):
+        return False, f"{filename} was not found in the knowledge base."
+
+    try:
+        os.remove(target_path)
+    except OSError as exc:
+        return False, f"Could not delete {filename}: {_safe_error(exc)}"
+
+    return True, None
+
+
 def _render_sources(chunk_details: list[dict]) -> None:
     if not chunk_details:
         return
@@ -389,6 +520,23 @@ def _requested_export_format(question: str) -> str | None:
     return "pdf" if asks_for_pdf else "txt"
 
 
+def _requests_full_conversation_export(question: str) -> bool:
+    normalized_question = question.casefold()
+    return bool(
+        re.search(
+            r"\b(?:all|entire|complete|whole)\s+(?:the\s+)?"
+            r"(?:chat|conversation|chat history|conversation history|"
+            r"messages|answers|responses)\b",
+            normalized_question,
+        )
+        or re.search(
+            r"\b(?:all|every)\s+(?:the\s+)?"
+            r"(?:assistant\s+)?(?:answers?|responses?|replies)\b",
+            normalized_question,
+        )
+    )
+
+
 def _latest_export_content(messages: list[dict]) -> str | None:
     """Use the latest successful answer, preserving its text across file requests."""
     for message in reversed(messages):
@@ -399,6 +547,37 @@ def _latest_export_content(messages: list[dict]) -> str | None:
         ):
             return message.get("export_content", message["content"])
     return None
+
+
+def _conversation_export_content(messages: list[dict]) -> str | None:
+    """Format chat messages as a chronological transcript for file export."""
+    transcript = []
+    for message in messages:
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        if message.get("is_file_notice") or message.get("generated_file"):
+            continue
+
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        speaker = "You" if role == "user" else "AdhivAI"
+        transcript.append(f"{speaker}:\n{content.strip()}")
+
+        if role == "assistant":
+            citations = list(
+                dict.fromkeys(
+                    chunk.get("citation") or chunk.get("source")
+                    for chunk in message.get("chunk_details", [])
+                    if chunk.get("citation") or chunk.get("source")
+                )
+            )
+            if citations:
+                transcript.append(f"Sources: {', '.join(citations)}")
+
+    return "\n\n".join(transcript) if transcript else None
 
 
 def _adjust_stepper(
@@ -463,14 +642,14 @@ question_count = sum(
 with st.sidebar:
     st.markdown(
         """
-        <div class="knova-brand">
-            <span class="knova-brand-icon">✨</span>
-            <span>🤖 AdhivAI ✨</span>
+        <div class="adhiv-brand">
+            <span class="adhiv-brand-icon">✦</span>
+            <span>AdhivAI</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    st.caption("🦋Your knowledge, thoughtfully connected❄️.")
+    st.caption("🔗 Your knowledge, thoughtfully connected.")
     st.caption(
         f"📚 {len(document_files)} documents  ·  "
         f"💬 {question_count} questions in this chat"
@@ -559,10 +738,17 @@ with st.sidebar:
 
     st.markdown(
         """
-        <div class="knova-footer">
-            <strong>AI-Powered RAG Chatbot with General Knowledge Fallback</strong><br>
-            ⚡ Powered by Python • LangChain • ChromaDB • Streamlit<br>
-            Built by Govind Singh Adhikari
+        <div class="adhiv-footer">
+            <div class="adhiv-footer-title">
+                ✦ AI-Powered RAG System for Document Q&amp;A and Knowledge Exploration
+            </div>
+            <div class="adhiv-footer-stack">
+                ⚙️ Powered by Python · LangChain · ChromaDB · Streamlit
+            </div>
+            <div class="adhiv-footer-signature">
+                👨‍💻 Built by
+                <span class="adhiv-footer-signature-name">Govind Singh Adhikari</span>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -571,9 +757,9 @@ with st.sidebar:
 st.markdown(
     """
     <div class="adhiv-hero">
-        <div class="adhiv-hero-title">✨ AdhivAI</div>
+        <div class="adhiv-hero-title">✦ AdhivAI</div>
         <div class="adhiv-hero-subtitle">
-            Ask freely. AdhivAI answers using your documents and its own general knowledge.
+            💬 Ask freely. AdhivAI answers using your documents and its own general knowledge. ✨
         </div>
     </div>
     """,
@@ -698,14 +884,65 @@ if setup_status is not None:
     else:
         setup_placeholder.empty()
 
+model_status = (
+    "Model ready"
+    if st.session_state.chain is not None
+    else "Model unavailable"
+    if st.session_state.chain_error
+    else "Model loading"
+)
+index_status_labels = {
+    "ready": "index synced",
+    "error": "index issue",
+    "syncing": "indexing",
+    "needs_sync": "index sync needed",
+    "not_checked": "index starting",
+}
+model_status_color = (
+    "green"
+    if st.session_state.chain is not None
+    else "red"
+    if st.session_state.chain_error
+    else "gray"
+)
+index_status_color = {
+    "ready": "green",
+    "error": "red",
+    "syncing": "orange",
+    "needs_sync": "orange",
+    "not_checked": "gray",
+}.get(st.session_state.index_status, "gray")
+status_columns = st.columns(3, gap="small")
+status_columns[0].badge(
+    model_status,
+    icon=":material/smart_toy:",
+    color=model_status_color,
+)
+status_columns[1].badge(
+    f"{len(document_files)} shared documents",
+    icon=":material/library_books:",
+    color="blue",
+)
+status_columns[2].badge(
+    index_status_labels.get(st.session_state.index_status, "index status unknown").title(),
+    icon=(
+        ":material/check_circle:"
+        if st.session_state.index_status == "ready"
+        else ":material/error:"
+        if st.session_state.index_status == "error"
+        else ":material/sync:"
+    ),
+    color=index_status_color,
+)
+
 if st.session_state.setup_timings:
     timings = st.session_state.setup_timings
-    st.caption(
-        "Workspace preparation · "
-        f"embedding model {timings.get('embedding_load_seconds', 0.0):.2f}s · "
-        f"index sync {timings.get('index_sync_seconds', 0.0):.2f}s · "
-        f"retriever setup {timings.get('retriever_setup_seconds', 0.0):.2f}s"
-    )
+    with st.expander("Setup performance", expanded=False):
+        st.caption(
+            f"Embedding model {timings.get('embedding_load_seconds', 0.0):.2f}s · "
+            f"index sync {timings.get('index_sync_seconds', 0.0):.2f}s · "
+            f"retriever setup {timings.get('retriever_setup_seconds', 0.0):.2f}s"
+        )
 
 with st.container(key="workspace-navigation", border=True):
     selected_workspace = st.segmented_control(
@@ -721,30 +958,34 @@ with st.container(key="workspace-navigation", border=True):
     )
 
 if selected_workspace == "Knowledge base":
-    st.markdown('<div class="knova-eyebrow">Your workspace</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="adhiv-eyebrow">Your workspace</div>',
+        unsafe_allow_html=True,
+    )
     st.title("📚 Knowledge base")
     st.caption("Add documents, review sync status, and tune how AdhivAI answers.")
 
     upload_column, status_column = st.columns([1.35, 1], gap="large")
     with upload_column:
-        st.subheader("Add documents")
-        st.caption("Upload TXT, Markdown, or PDF files to your knowledge base.")
+        st.subheader("Upload documents")
+        st.caption("Select files first, then upload them to your knowledge base.")
         uploaded_files = st.file_uploader(
-            "Drag files here or browse",
+            "Select document(s)",
             type=[extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS],
             accept_multiple_files=True,
             help="Text-based PDFs are supported. Scanned PDFs require OCR.",
+            key=f"document_uploader_{st.session_state.document_uploader_version}",
         )
         if st.button(
-            "Add documents",
+            "Upload to knowledge base",
             icon=":material/upload_file:",
             type="primary",
             width="stretch",
         ):
             if not uploaded_files:
-                st.info("Choose at least one file to upload.")
+                st.info("Choose at least one file before uploading.")
             else:
-                with st.spinner("Adding your selected documents..."):
+                with st.spinner("Uploading your selected documents..."):
                     saved, unchanged, upload_errors = _save_uploaded_files(
                         uploaded_files, CONFIG["documents_folder"]
                     )
@@ -760,6 +1001,7 @@ if selected_workspace == "Knowledge base":
                         summary.append(f"{len(unchanged)} already up to date")
                     st.session_state.upload_notice = ". ".join(summary) + "."
                 st.session_state.upload_errors = upload_errors
+                st.session_state.document_uploader_version += 1
                 st.rerun()
 
     with status_column:
@@ -785,6 +1027,39 @@ if selected_workspace == "Knowledge base":
         else:
             st.badge("Needs sync", icon=":material/schedule:", color="orange")
 
+        with st.expander("Owner controls", expanded=False):
+            admin_password = _configured_admin_password()
+            if not admin_password:
+                st.warning(
+                    "Document deletion is disabled until "
+                    "`ADHIVAI_ADMIN_PASSWORD` is configured in Streamlit secrets."
+                )
+            elif st.session_state.admin_authenticated:
+                st.success("Owner access is unlocked for this session.")
+                if st.button(
+                    "Lock owner controls",
+                    key="lock_admin_controls",
+                    width="stretch",
+                ):
+                    st.session_state.admin_authenticated = False
+                    st.session_state.pending_document_deletion = None
+                    st.rerun()
+            else:
+                with st.form("owner_login_form"):
+                    st.text_input(
+                        "Owner password",
+                        type="password",
+                        key="admin_password_input",
+                    )
+                    st.form_submit_button(
+                        "Unlock delete controls",
+                        type="primary",
+                        width="stretch",
+                        on_click=_authenticate_admin,
+                    )
+                if st.session_state.admin_login_error:
+                    st.error(st.session_state.admin_login_error)
+
         if st.button(
             "Sync / rebuild knowledge base",
             icon=":material/sync:",
@@ -801,6 +1076,8 @@ if selected_workspace == "Knowledge base":
         elif not document_files:
             st.info("Your document list is empty. Upload a supported file above.")
         else:
+            if not st.session_state.admin_authenticated:
+                st.caption("Only the workspace owner can delete shared documents.")
             for document in document_files:
                 icon = (
                     "picture_as_pdf"
@@ -808,11 +1085,65 @@ if selected_workspace == "Knowledge base":
                     else "description"
                 )
                 with st.container(border=True):
-                    st.markdown(f":material/{icon}: **{document['name']}**")
-                    st.caption(
-                        f"{document['extension'].lstrip('.').upper()} · "
-                        f"{_format_size(document['size'])}"
-                    )
+                    document_row = st.columns([4.8, 1.2])
+                    with document_row[0]:
+                        st.markdown(f":material/{icon}: **{document['name']}**")
+                        st.caption(
+                            f"{document['extension'].lstrip('.').upper()} · "
+                            f"{_format_size(document['size'])}"
+                        )
+                    with document_row[1]:
+                        if (
+                            st.session_state.admin_authenticated
+                            and st.session_state.pending_document_deletion
+                            != document["name"]
+                            and st.button(
+                                "Delete",
+                                key=f"delete_document_{document['name']}",
+                                type="secondary",
+                                width="stretch",
+                            )
+                        ):
+                            st.session_state.pending_document_deletion = document["name"]
+                            st.rerun()
+
+                    if (
+                        st.session_state.admin_authenticated
+                        and st.session_state.pending_document_deletion
+                        == document["name"]
+                    ):
+                        st.warning(f"Delete **{document['name']}** permanently?")
+                        confirm_column, cancel_column = st.columns(2)
+                        if confirm_column.button(
+                            "Confirm delete",
+                            key=f"confirm_delete_document_{document['name']}",
+                            type="primary",
+                            width="stretch",
+                        ):
+                            deleted, delete_error = _delete_document_file(
+                                document["name"], CONFIG["documents_folder"]
+                            )
+                            st.session_state.pending_document_deletion = None
+                            if deleted:
+                                st.session_state.index_status = "needs_sync"
+                                st.session_state.index_error = None
+                                st.session_state.retriever = None
+                                st.session_state.upload_notice = (
+                                    f"Deleted {document['name']} from the knowledge base."
+                                )
+                            else:
+                                st.session_state.upload_errors = [
+                                    delete_error
+                                    or f"Could not delete {document['name']}."
+                                ]
+                            st.rerun()
+                        if cancel_column.button(
+                            "Cancel",
+                            key=f"cancel_delete_document_{document['name']}",
+                            width="stretch",
+                        ):
+                            st.session_state.pending_document_deletion = None
+                            st.rerun()
 
     for upload_error in st.session_state.upload_errors:
         st.error(upload_error)
@@ -828,30 +1159,48 @@ if selected_workspace == "Knowledge base":
         )
 
 else:
-    st.markdown('<div class="knova-eyebrow">AdhivAI</div>', unsafe_allow_html=True)
-    st.subheader("Chat with AdhivAI✨")
-    st.caption("Ask about your documents or explore a topic.")
+    st.markdown('<div class="adhiv-eyebrow">AdhivAI</div>', unsafe_allow_html=True)
 
     if st.session_state.chain_error:
         st.warning(st.session_state.chain_error)
 
     suggested_question = None
     if not st.session_state.messages:
-        st.caption("Try asking:")
-        prompt_columns = st.columns(2, gap="small")
-        example_questions = (
-            ("Summarize my experience", ":material/summarize:"),
-            ("What key skills appear in my documents?", ":material/lightbulb:"),
-        )
-        for index, (question_text, icon) in enumerate(example_questions):
-            with prompt_columns[index]:
-                if st.button(
-                    question_text,
-                    key=f"example_prompt_{index}",
-                    icon=icon,
-                    width="stretch",
-                ):
-                    suggested_question = question_text
+        with st.container(border=True, key="welcome-panel"):
+            st.markdown("### Start a conversation")
+            st.caption(
+                "Ask questions about the shared knowledge base, get a summary, "
+                "or explore a topic using general knowledge."
+            )
+            st.markdown("**Get started with a question**")
+            st.caption("About your documents")
+            document_prompt_columns = st.columns(2, gap="small")
+            document_questions = (
+                ("Summarize the key points in my documents", ":material/summarize:"),
+                (
+                    "Summarize my experience and key skills from my résumé",
+                    ":material/description:",
+                ),
+            )
+            for index, (question_text, icon) in enumerate(document_questions):
+                with document_prompt_columns[index]:
+                    if st.button(
+                        question_text,
+                        key=f"example_prompt_{index}",
+                        icon=icon,
+                        width="stretch",
+                    ):
+                        suggested_question = question_text
+
+            st.caption("General knowledge")
+            general_question = "Explain a topic in simple terms"
+            if st.button(
+                general_question,
+                key="example_prompt_general",
+                icon=":material/lightbulb:",
+                width="stretch",
+            ):
+                suggested_question = general_question
 
     for message_index, message in enumerate(st.session_state.messages):
         with st.chat_message(
@@ -886,10 +1235,10 @@ else:
                         f"{answer_timings['generation_seconds']:.2f}s"
                     )
 
-    st.markdown("#### Ask AdhivAI✨....")
+    st.markdown("#### ✦ Ask AdhivAI...")
     typed_question = st.chat_input(
         "Type your question here",
-        key="knova_chat_input",
+        key="adhiv_chat_input",
     )
     question = suggested_question or typed_question
 
@@ -903,16 +1252,25 @@ else:
             export_format = _requested_export_format(question)
             if export_format:
                 try:
-                    # A file request refers to the latest assistant answer; do not
-                    # send it through document retrieval and answer generation again.
-                    export_content = _latest_export_content(
-                        st.session_state.messages[:-1]
-                    )
+                    prior_messages = st.session_state.messages[:-1]
+                    full_conversation = _requests_full_conversation_export(question)
+                    if full_conversation:
+                        export_content = _conversation_export_content(prior_messages)
+                    else:
+                        # A file request refers to the latest answer unless the
+                        # user explicitly asks for the full conversation.
+                        export_content = _latest_export_content(prior_messages)
                     if export_content is None:
-                        response = (
-                            "Ask a question first, then request a TXT or PDF "
-                            "export of my answer."
-                        )
+                        if full_conversation:
+                            response = (
+                                "Have a conversation first, then request a TXT "
+                                "or PDF export of the full chat."
+                            )
+                        else:
+                            response = (
+                                "Ask a question first, then request a TXT or PDF "
+                                "export of my answer."
+                            )
                         st.info(response)
                         st.session_state.messages.append(
                             {
@@ -925,8 +1283,14 @@ else:
                         file_data, file_name, mime_type = create_export_file(
                             export_content,
                             export_format,
+                            is_conversation=full_conversation,
                         )
-                        response = f"Created **{file_name}** from my previous answer."
+                        scope = (
+                            "the full conversation"
+                            if full_conversation
+                            else "my previous answer"
+                        )
+                        response = f"Created **{file_name}** from {scope}."
                         st.markdown(response)
                         st.session_state.messages.append(
                             {

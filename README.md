@@ -1,16 +1,24 @@
-# Knowva AI — Streamlit RAG workspace
+# AdhivAI — Streamlit RAG workspace
 # Phase 3 of the RAG Learning Project
 
 ---
 
 ## What We Built
 
-A fully working RAG (Retrieval-Augmented Generation) chatbot with a three-panel
-document-management and chat workspace.
-- Ask questions about your own documents
-- Upload TXT, Markdown, and PDF documents from the browser
-- Answers show retrieved source text and PDF page citations when available
-- Use the configurable Groq model, temperature, and retrieval count
+A RAG (Retrieval-Augmented Generation) system with a shared document knowledge
+base and chat workspace.
+- Ask questions about shared PDF, Markdown, and TXT documents or general topics
+- See retrieved passages and PDF page citations when available
+- Upload documents and synchronize the shared ChromaDB index
+- Restrict document deletion to the workspace owner
+- Export the latest answer or the complete conversation as PDF or TXT
+- Adjust the Groq model, temperature, and number of retrieved passages
+
+The interface uses the **✦ AdhivAI** brand, a short RAG-system description,
+status badges, and a welcome panel with three optional starter questions:
+summarize document key points, summarize résumé experience and skills, or
+explain a topic in simple terms. The footer credits the project author and
+lists the main technologies.
 
 ---
 
@@ -22,6 +30,26 @@ python -m streamlit run app.py
 ```
 
 Opens automatically at: http://localhost:8501
+
+## Owner-only document deletion
+
+Documents in the knowledge base are shared and searchable by all users. Only
+the workspace owner can delete them. Configure a strong owner password in the
+Streamlit Cloud app's **Settings → Secrets**:
+
+```toml
+ADHIVAI_ADMIN_PASSWORD = "use-a-long-unique-password"
+```
+
+For local development, put the same setting in `.streamlit/secrets.toml` or
+set it in the project's `.env` file. Never commit the password or secrets file.
+In the app, open **Knowledge base → Owner controls** and enter the owner
+password to unlock the delete controls. Each deletion requires a second
+confirmation and the index is synchronized to remove the deleted document's
+vectors.
+
+This password gate protects deletion controls; it does not make documents
+private. Everyone using the app can still search the shared knowledge base.
 
 ---
 
@@ -51,19 +79,23 @@ the RAG orchestration remains in the existing `core/` modules.
 
 ### 1. Page Config
 ```python
-st.set_page_config(page_title="Knowva AI", layout="wide")
+st.set_page_config(page_title="AdhivAI", layout="wide")
 ```
 - Sets the browser tab title and uses the wide layout for the workspace
 
-### 2. Three-panel workspace
+### 2. Workspace navigation
 ```python
 with st.sidebar:
     st.button("New chat")
-    st.button("Sync knowledge base")
 ```
-- The sidebar contains navigation, conversation statistics, settings, and actions
-- The center panel manages uploads and reports the actual index-sync status
-- The main panel contains suggested prompts, chat history, and source context
+- The sidebar contains conversation actions, model settings, and AdhivAI
+  branding
+- The Knowledge base section manages uploads, synchronization, and documents
+- The Chat section contains suggested prompts, chat history, and source context
+- The welcome screen offers two document prompts and one general-knowledge
+  prompt; these are suggestions, not limits on what users may ask
+- Status badges show model readiness, shared document count, and index state
+- Setup timings are available in the collapsed **Setup performance** section
 
 ### 3. Chat Messages
 ```python
@@ -100,6 +132,13 @@ st.session_state.messages = []
 - `st.session_state` is a dictionary that persists data across reruns
 - Used to store chat history, retriever, and chain so they are not rebuilt on every message
 
+### 7. Chat exports
+
+Ask AdhivAI to export the latest answer as a PDF or TXT, or explicitly request
+the full/complete chat or all answers to export a chronological conversation
+transcript. Full-chat exports include user questions, assistant responses, and
+available source citations.
+
 ---
 
 ## Project Structure
@@ -115,7 +154,7 @@ streamlit_app/
 ├── documents/              ← Your knowledge base (.txt, .md, and .pdf)
 ├── chroma_db/              ← Auto-created, stores vector embeddings locally
 ├── index_tracker.json      ← Auto-created, tracks which files are indexed
-├── .env                    ← Config (API key, model, chunk size etc.)
+├── .env                    ← Local config (API key, model, chunk size, admin password)
 └── .gitignore              ← Prevents .env and chroma_db from being committed
 ```
 
@@ -150,7 +189,7 @@ app.py saves message to st.session_state.messages (chat history)
 ## What Happens on File Upload
 
 ```
-User uploads files in the document library panel and clicks Add documents
+User selects files in the Knowledge base and clicks Upload to knowledge base
         ↓
 app.py saves the file to the configured documents/ folder
         ↓
@@ -168,10 +207,16 @@ core/indexing.py → build_index()
 New file is now searchable immediately
 ```
 
-When files are added, edited, or deleted directly in `documents/`, click
-**Sync knowledge base** in the sidebar. The app also synchronizes the index
-when it starts. Text-based PDFs are supported. Scanned PDFs containing only
-images need OCR before their content can be searched.
+After an upload attempt, the file picker is cleared. To remove a document from
+the app, the workspace owner unlocks **Owner controls** in the Knowledge base,
+chooses **Delete**, and confirms. The app deletes the file and synchronizes the
+index, removing its vectors. Other users can still search all documents in the
+shared knowledge base but cannot delete them.
+
+When files are changed directly in `documents/`, use **Sync / rebuild
+knowledge base** in the Knowledge base section. The app also synchronizes the
+index when it starts. Text-based PDFs are supported. Scanned PDFs containing
+only images need OCR before their content can be searched.
 
 The app does not apply a relevance-score cutoff. It always sends the top
 `TOP_K` matching chunks (3 by default) to the LLM. For general-knowledge
@@ -195,10 +240,10 @@ The local embedding model is loaded only if files need indexing
 App ready — chat history is cleared (new session)
 ```
 
-When the first question is asked, the app loads the local embedding model for
-retrieval if it has not already been loaded. The model is shared by indexing
-and retrieval and is created only once per process. On the first run,
-downloading/loading that model and embedding new files can take time; later
+The app loads the local embedding model when needed for indexing and retrieval.
+The model is shared by both and is created only once per process. Setup
+performance timings are available in a collapsed section. On the first run,
+downloading/loading the model and embedding new files can take time; later
 starts do not re-embed unchanged files.
 
 ---
