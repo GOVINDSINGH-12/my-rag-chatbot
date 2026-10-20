@@ -1,0 +1,11 @@
+chromadb
+langchain-community
+langchain-core
+langchain-groq
+langchain-huggingface
+langchain-text-splitters
+pypdf
+python-dotenv
+reportlab>=4.0,<6
+sentence-transformers
+streamlit
