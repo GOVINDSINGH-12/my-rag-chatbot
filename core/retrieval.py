@@ -35,33 +35,57 @@ def load_retriever(config: dict):
     )
 
 
-def retrieve(question: str, retriever, config: dict) -> tuple:
+def retrieve(
+    question: str,
+    retriever,
+    config: dict,
+    source_path: str | None = None,
+) -> tuple:
     """
-    Step 1: search Chroma for the configured number of closest chunks.
-    Step 2: return those exact chunks with their source names and page details.
+    Search for the configured number of closest chunks, optionally within one file.
+
+    Chroma stores each source path in chunk metadata, so a named-document query
+    can filter by that exact path without changing the index format.
     """
-    documents = retriever.invoke(question)
+    if source_path:
+        vectorstore = getattr(retriever, "vectorstore", None)
+        if vectorstore is None:
+            raise ValueError(
+                "The active retriever does not expose its vector store for "
+                "document-filtered search."
+            )
+        normalized_source = os.path.normcase(os.path.abspath(source_path))
+        documents = vectorstore.similarity_search(
+            question,
+            k=config["top_k"],
+            filter={"source": normalized_source},
+        )
+    else:
+        documents = retriever.invoke(question)
 
-    chunks = [document.page_content for document in documents]
+    chunks = []
+    chunk_details = []
+    selected_source_name = os.path.basename(source_path) if source_path else None
+    for document in documents:
+        source = selected_source_name or os.path.basename(
+            document.metadata.get("source", "unknown")
+        )
+        page = document.metadata.get("page")
+        citation = (
+            f"{source} (page {page + 1})"
+            if isinstance(page, int)
+            else source
+        )
+        # Keep provenance in the model context as well as in the visible citation.
+        chunks.append(f"Source: {citation}\n{document.page_content}")
+        chunk_details.append(
+            {
+                "text": document.page_content,
+                "source": source,
+                "citation": citation,
+            }
+        )
 
-    sources = sorted({
-        os.path.basename(document.metadata.get("source", "unknown"))
-        for document in documents
-    })
-
-    # Keep citation details aligned with the same ordered chunks sent to the LLM.
-    chunk_details = [
-        {
-            "text": document.page_content,
-            "source": os.path.basename(document.metadata.get("source", "unknown")),
-            "citation": (
-                f"{os.path.basename(document.metadata.get('source', 'unknown'))} "
-                f"(page {document.metadata['page'] + 1})"
-                if isinstance(document.metadata.get("page"), int)
-                else os.path.basename(document.metadata.get("source", "unknown"))
-            ),
-        }
-        for document in documents
-    ]
+    sources = sorted({detail["source"] for detail in chunk_details})
 
     return chunks, sources, chunk_details

@@ -221,6 +221,12 @@ only images need OCR before their content can be searched.
 The app does not apply a relevance-score cutoff. It always sends the top
 `TOP_K` matching chunks (3 by default) to the LLM. For general-knowledge
 questions, the LLM is instructed to ignore chunks unrelated to the question.
+When a question includes an uploaded document's full name (without its file
+extension), retrieval filters ChromaDB to that document and includes its
+filename/page citation with each passage. If more than one uploaded file has
+the same name, AdhivAI asks the user to clarify. Named-document questions still
+use the configured `TOP_K` limit; they do not automatically summarize every
+page of a long document.
 
 ---
 

@@ -417,6 +417,23 @@ def _list_documents(folder: str) -> tuple[list[dict], str | None]:
     return documents, None
 
 
+def _find_document_matches(question: str, documents: list[dict]) -> list[dict]:
+    """Match complete document names (without extensions) mentioned in a query."""
+    normalized_question = re.sub(r"[^a-z0-9]+", " ", question.casefold()).strip()
+    question_text = f" {normalized_question} "
+    matches = []
+
+    for document in documents:
+        document_stem = Path(document["name"]).stem
+        normalized_stem = re.sub(
+            r"[^a-z0-9]+", " ", document_stem.casefold()
+        ).strip()
+        if normalized_stem and f" {normalized_stem} " in question_text:
+            matches.append(document)
+
+    return matches
+
+
 def _format_size(size: int | None) -> str:
     if size is None:
         return "Size unavailable"
@@ -1323,56 +1340,103 @@ else:
                     sources = []
                     chunk_details = []
                     retrieval_notice = None
+                    answer = None
                     answer_timings = {
                         "retrieval_seconds": 0.0,
                         "generation_seconds": 0.0,
                     }
+                    document_matches = _find_document_matches(
+                        question, document_files
+                    )
                     with st.spinner("AdhivAI is searching for your answer..."):
                         retrieval_started = time.perf_counter()
-                        if st.session_state.index_status == "ready":
+                        if len(document_matches) > 1:
+                            matching_names = ", ".join(
+                                f"**{document['name']}**"
+                                for document in document_matches
+                            )
+                            answer = (
+                                "I found multiple documents matching that name: "
+                                f"{matching_names}. Please mention the full file name."
+                            )
+                        elif st.session_state.index_status == "ready":
                             try:
                                 if st.session_state.retriever is None:
                                     st.session_state.retriever = load_retriever(
                                         active_config
                                     )
+                                source_path = None
+                                if document_matches:
+                                    source_path = os.path.normcase(
+                                        os.path.abspath(
+                                            os.path.join(
+                                                CONFIG["documents_folder"],
+                                                document_matches[0]["name"],
+                                            )
+                                        )
+                                    )
                                 chunks, sources, chunk_details = retrieve(
                                     question,
                                     st.session_state.retriever,
                                     active_config,
+                                    source_path=source_path,
                                 )
+                                if source_path and not chunks:
+                                    answer = (
+                                        f"I found **{document_matches[0]['name']}**, "
+                                        "but it has no readable indexed text. "
+                                        "It may need to be synced, or the PDF may "
+                                        "be scanned and require OCR."
+                                    )
                             except Exception as exc:
                                 st.session_state.retriever = None
-                                retrieval_notice = (
-                                    "The knowledge base could not be searched, so "
-                                    "this answer uses general knowledge only. "
-                                    + _safe_error(exc, CONFIG["groq_api_key"])
-                                )
+                                if document_matches:
+                                    answer = (
+                                        f"I couldn't search **{document_matches[0]['name']}**. "
+                                        + _safe_error(exc, CONFIG["groq_api_key"])
+                                    )
+                                else:
+                                    retrieval_notice = (
+                                        "The knowledge base could not be searched, so "
+                                        "this answer uses general knowledge only. "
+                                        + _safe_error(exc, CONFIG["groq_api_key"])
+                                    )
                         else:
-                            retrieval_notice = (
-                                "The knowledge base is not ready, so this answer "
-                                "uses general knowledge only."
-                            )
-                            if st.session_state.index_error:
-                                retrieval_notice += (
-                                    f" Index status: "
-                                    f"{st.session_state.index_error}"
+                            if document_matches:
+                                answer = (
+                                    f"I found **{document_matches[0]['name']}**, "
+                                    "but the knowledge base is not ready to search "
+                                    "it yet. Please try again after indexing finishes."
                                 )
+                            else:
+                                retrieval_notice = (
+                                    "The knowledge base is not ready, so this answer "
+                                    "uses general knowledge only."
+                                )
+                                if st.session_state.index_error:
+                                    retrieval_notice += (
+                                        f" Index status: "
+                                        f"{st.session_state.index_error}"
+                                    )
 
                         answer_timings["retrieval_seconds"] = (
                             time.perf_counter() - retrieval_started
                         )
 
-                        if st.session_state.chain is None:
-                            raise RuntimeError(
-                                st.session_state.chain_error
-                                or "The answer model is not available."
-                            )
+                        if answer is None:
+                            if st.session_state.chain is None:
+                                raise RuntimeError(
+                                    st.session_state.chain_error
+                                    or "The answer model is not available."
+                                )
 
-                        generation_started = time.perf_counter()
-                        answer = generate(question, chunks, st.session_state.chain)
-                        answer_timings["generation_seconds"] = (
-                            time.perf_counter() - generation_started
-                        )
+                            generation_started = time.perf_counter()
+                            answer = generate(
+                                question, chunks, st.session_state.chain
+                            )
+                            answer_timings["generation_seconds"] = (
+                                time.perf_counter() - generation_started
+                            )
 
                     if retrieval_notice:
                         st.warning(retrieval_notice)
