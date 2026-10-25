@@ -21,7 +21,7 @@ knowledge, **Knowledge Base only** to answer only from retrieved passages, or
 
 The interface uses the **✦ AdhivAI** brand, a short RAG-system description,
 status badges, and a welcome panel with three optional starter questions:
-summarize document key points, summarize résumé experience and skills, or
+summarize document key points, summarize resume experience and skills, or
 explain a topic in simple terms. The footer credits the project author and
 lists the main technologies.
 
