@@ -7,18 +7,27 @@
 
 A RAG (Retrieval-Augmented Generation) system with a shared document knowledge
 base and chat workspace.
-- Ask questions about shared PDF, Markdown, and TXT documents or general topics
-- See retrieved passages and PDF page citations when available
+- Ask questions about shared PDF, Markdown, TXT, and Excel documents or general topics
+- See retrieved passages with PDF page or Excel worksheet citations when available
 - Upload documents and synchronize the shared ChromaDB index
+- Choose Documents + AI, Knowledge Base only, or AI-only for each question
 - Restrict document deletion to the workspace owner
 - Export the latest answer or the complete conversation as PDF or TXT
 - Adjust the Groq model, temperature, and number of retrieved passages
+
+In Chat, choose **Documents + AI** to combine document search with general
+knowledge, **Knowledge Base only** to answer only from retrieved passages, or
+**AI-only** to skip document search. Documents + AI is the default.
 
 The interface uses the **✦ AdhivAI** brand, a short RAG-system description,
 status badges, and a welcome panel with three optional starter questions:
 summarize document key points, summarize résumé experience and skills, or
 explain a topic in simple terms. The footer credits the project author and
 lists the main technologies.
+
+Workspace navigation includes **Chat**, **Knowledge base**, and **Explore
+AdhivAI**. Explore AdhivAI is an interactive guide to the answer modes, supported
+file types, document management, and tips for improving incomplete answers.
 
 ---
 
@@ -91,6 +100,7 @@ with st.sidebar:
 - The sidebar contains conversation actions, model settings, and AdhivAI
   branding
 - The Knowledge base section manages uploads, synchronization, and documents
+- Explore AdhivAI provides clickable explanations of the app's features
 - The Chat section contains suggested prompts, chat history, and source context
 - The welcome screen offers two document prompts and one general-knowledge
   prompt; these are suggestions, not limits on what users may ask
@@ -134,10 +144,10 @@ st.session_state.messages = []
 
 ### 7. Chat exports
 
-Ask AdhivAI to export the latest answer as a PDF or TXT, or explicitly request
-the full/complete chat or all answers to export a chronological conversation
-transcript. Full-chat exports include user questions, assistant responses, and
-available source citations.
+Ask AdhivAI to export the latest answer, the last N answers (for example, "the
+last 3 answers"), or explicitly request the full/complete chat as a PDF or TXT.
+Exports of selected answers include available source citations. Full-chat
+exports include user questions, assistant responses, and available citations.
 
 ---
 
@@ -151,7 +161,7 @@ streamlit_app/
 │   ├── retrieval.py        ← Search ChromaDB for relevant chunks
 │   ├── embeddings.py       ← Share the loaded local embedding model
 │   └── generation.py      ← Build prompt + call Groq LLM + return answer
-├── documents/              ← Your knowledge base (.txt, .md, and .pdf)
+├── documents/              ← Your knowledge base (.txt, .md, .pdf, .xls, and .xlsx)
 ├── chroma_db/              ← Auto-created, stores vector embeddings locally
 ├── index_tracker.json      ← Auto-created, tracks which files are indexed
 ├── .env                    ← Local config (API key, model, chunk size, admin password)
@@ -167,13 +177,18 @@ User types question in browser
         ↓
 app.py receives question via st.chat_input()
         ↓
-core/retrieval.py → retrieve(question, retriever, config)
-    - Converts question to a vector using HuggingFaceEmbeddings
+app.py selects up to the 6 most recent valid chat messages
+        ↓
+core/generation.py → contextualize_question(question, history, chains)
+    - Rewrites follow-up questions as standalone search queries
+        ↓
+core/retrieval.py → retrieve(search_query, retriever, config)
+    - Converts the search query to a vector using HuggingFaceEmbeddings
     - Searches ChromaDB and always returns the top-K matching chunks
     - Sends those chunks and their source metadata to answer generation
         ↓
-core/generation.py → generate(question, chunks, chain)
-    - Joins chunks into context block
+core/generation.py → generate(question, chunks, chains, history)
+    - Sends recent chat history and retrieved chunks as context
     - Uses matching chunks for document-specific questions
     - Uses general knowledge when retrieved chunks do not help answer the question
     - Sends prompt to Groq LLM (ChatGroq)
@@ -183,6 +198,10 @@ app.py displays answer in chat bubble
 app.py keeps retrieved chunks and their sources in a collapsed expander
 app.py saves message to st.session_state.messages (chat history)
 ```
+
+Chat history helps resolve follow-up questions and references. Document-specific
+answers must still be supported by retrieved passages; previous assistant
+answers are not treated as evidence.
 
 ---
 
@@ -216,7 +235,11 @@ shared knowledge base but cannot delete them.
 When files are changed directly in `documents/`, use **Sync / rebuild
 knowledge base** in the Knowledge base section. The app also synchronizes the
 index when it starts. Text-based PDFs are supported. Scanned PDFs containing
-only images need OCR before their content can be searched.
+only images need OCR before their content can be searched. Excel `.xls` and
+`.xlsx` workbooks are indexed worksheet by worksheet; worksheet names and column
+headers are included with row content, and citations identify the workbook and
+worksheet. For `.xlsx` formulas, the app reads saved formula results when
+available; it does not calculate formulas itself.
 
 The app does not apply a relevance-score cutoff. It always sends the top
 `TOP_K` matching chunks (3 by default) to the LLM. For general-knowledge
@@ -259,7 +282,7 @@ starts do not re-embed unchanged files.
 | Layer | Tool | Purpose |
 |---|---|---|
 | UI | Streamlit | Web interface without HTML/CSS/JS |
-| Document Loading | LangChain TextLoader + PyPDFLoader | Read .txt, .md, and .pdf files |
+| Document Loading | LangChain loaders, openpyxl, xlrd | Read .txt, .md, .pdf, .xls, and .xlsx files |
 | Chunking | RecursiveCharacterTextSplitter | Split docs into overlapping chunks |
 | Embeddings | HuggingFaceEmbeddings (all-MiniLM-L6-v2) | Convert text to vectors locally |
 | Vector Store | ChromaDB | Store and search vectors locally |

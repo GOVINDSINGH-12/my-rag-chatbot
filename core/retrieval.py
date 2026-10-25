@@ -10,17 +10,16 @@
 #       --> Returns top-k chunks with source filenames
 # =============================================================================
 
+# Step 1: Import Chroma and the shared embedding-model loader.
 import os
 from langchain_community.vectorstores import Chroma
 
 from core.embeddings import get_embeddings
 
 
+# Step 2: Open the collection and configure its similarity-search retriever.
 def load_retriever(config: dict):
-    """
-    Step 1: connect to the existing Chroma collection.
-    Step 2: configure retrieval to return the top-k closest chunks.
-    """
+    """Connect to Chroma and configure similarity search for the top-k chunks."""
     embeddings = get_embeddings(config["embedding_model"])
 
     vectorstore = Chroma(
@@ -46,7 +45,11 @@ def retrieve(
 
     Chroma stores each source path in chunk metadata, so a named-document query
     can filter by that exact path without changing the index format.
+
+    Returns model-ready chunks, unique source filenames, and citation details
+    used to display the retrieved passages in the chat.
     """
+    # Step 3: Search either the requested file alone or the full collection.
     if source_path:
         vectorstore = getattr(retriever, "vectorstore", None)
         if vectorstore is None:
@@ -63,6 +66,7 @@ def retrieve(
     else:
         documents = retriever.invoke(question)
 
+    # Step 4: Add citations and prepare context for the model and chat UI.
     chunks = []
     chunk_details = []
     selected_source_name = os.path.basename(source_path) if source_path else None
@@ -71,11 +75,13 @@ def retrieve(
             document.metadata.get("source", "unknown")
         )
         page = document.metadata.get("page")
-        citation = (
-            f"{source} (page {page + 1})"
-            if isinstance(page, int)
-            else source
-        )
+        sheet = document.metadata.get("sheet")
+        if sheet:
+            citation = f"{source} (sheet: {sheet})"
+        elif isinstance(page, int):
+            citation = f"{source} (page {page + 1})"
+        else:
+            citation = source
         # Keep provenance in the model context as well as in the visible citation.
         chunks.append(f"Source: {citation}\n{document.page_content}")
         chunk_details.append(

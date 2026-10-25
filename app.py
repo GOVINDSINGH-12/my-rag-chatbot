@@ -1,19 +1,31 @@
+"""AdhivAI's Streamlit entry point.
+
+Streamlit executes this file from top to bottom, then reruns it after user
+interactions. After configuration and page setup, helper functions are defined;
+their bodies run only when called. The app then initializes shared state and
+services, shows the selected workspace, and handles any new chat question.
+"""
+
+# Step 1: Load Python utilities, Streamlit, and the app's feature modules.
 import hmac
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from core.generation import build_chain, generate
+from core.generation import build_chain, contextualize_question, generate
 from core.embeddings import get_embeddings
 from core.exporting import create_export_file
 from core.indexing import SUPPORTED_EXTENSIONS, build_index
 from core.retrieval import load_retriever, retrieve
+from core.answer_modes import AI_ONLY, KNOWLEDGE_BASE_ONLY
+from core.ui import render_answer_mode_selector, render_explore_adhivai
 
-
+# Step 2: Read environment settings and build paths relative to this app.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
@@ -35,6 +47,7 @@ CONFIG = {
     ),
 }
 
+# Step 3: Configure the browser page and apply the app's visual styling.
 st.set_page_config(
     page_title="AdhivAI",
     page_icon=":material/auto_awesome:",
@@ -215,6 +228,14 @@ st.markdown(
         padding: 0.35rem 0.65rem;
     }
 
+    .st-key-answer-mode-panel {
+        background: #efedff;
+        border: 1px solid #d9d5ee;
+        border-radius: 0.9rem;
+        margin: 0.25rem 0 0.65rem;
+        padding: 0.65rem 0.85rem 0.25rem;
+    }
+
     .st-key-workspace-navigation [data-testid="stSegmentedControl"] {
         overflow: visible;
     }
@@ -226,8 +247,32 @@ st.markdown(
     }
 
     .st-key-workspace-navigation
+        [data-testid="stSegmentedControl"] button:nth-of-type(1)
+        [data-testid="stIconMaterial"] {
+        color: #6a5bc2;
+    }
+
+    .st-key-workspace-navigation
+        [data-testid="stSegmentedControl"] button:nth-of-type(2)
+        [data-testid="stIconMaterial"] {
+        color: #16877a;
+    }
+
+    .st-key-workspace-navigation
+        [data-testid="stSegmentedControl"] button:nth-of-type(3)
+        [data-testid="stIconMaterial"] {
+        color: #bd7b16;
+    }
+
+    .st-key-workspace-navigation
         [data-testid="stSegmentedControl"] button[aria-pressed="true"] {
         background: #5b4bc4;
+        color: #ffffff;
+    }
+
+    .st-key-workspace-navigation
+        [data-testid="stSegmentedControl"] button[aria-pressed="true"]
+        [data-testid="stIconMaterial"] {
         color: #ffffff;
     }
 
@@ -330,7 +375,9 @@ st.markdown(
 )
 
 
+# Helper functions below are defined now and called by setup and UI actions.
 def _initialize_session_state() -> None:
+    """Set defaults once so chat, settings, and setup results survive reruns."""
     defaults = {
         "messages": [],
         "retriever": None,
@@ -360,6 +407,7 @@ def _initialize_session_state() -> None:
 
 
 def _safe_error(exc: Exception, secret: str | None = None) -> str:
+    """Format an error for the UI without exposing a configured secret."""
     detail = str(exc).strip()
     if secret:
         detail = detail.replace(secret, "[redacted]")
@@ -368,6 +416,7 @@ def _safe_error(exc: Exception, secret: str | None = None) -> str:
 
 
 def _configured_admin_password() -> str | None:
+    """Read the owner password from the environment or Streamlit secrets."""
     password = os.getenv("ADHIVAI_ADMIN_PASSWORD")
     if password:
         return password
@@ -379,6 +428,7 @@ def _configured_admin_password() -> str | None:
 
 
 def _authenticate_admin() -> None:
+    """Check the submitted owner password and update this session's access."""
     expected_password = _configured_admin_password()
     entered_password = st.session_state.get("admin_password_input", "")
     if expected_password and hmac.compare_digest(
@@ -393,6 +443,7 @@ def _authenticate_admin() -> None:
 
 
 def _list_documents(folder: str) -> tuple[list[dict], str | None]:
+    """List supported files with their display metadata, or return a read error."""
     documents = []
     try:
         for filename in sorted(os.listdir(folder), key=str.casefold):
@@ -418,23 +469,42 @@ def _list_documents(folder: str) -> tuple[list[dict], str | None]:
 
 
 def _find_document_matches(question: str, documents: list[dict]) -> list[dict]:
-    """Match complete document names (without extensions) mentioned in a query."""
-    normalized_question = re.sub(r"[^a-z0-9]+", " ", question.casefold()).strip()
+    """Match complete filenames or distinctive filename words in a query."""
+    def normalize_words(value: str) -> list[str]:
+        normalized = unicodedata.normalize("NFKD", value.casefold())
+        unaccented = "".join(
+            character
+            for character in normalized
+            if not unicodedata.combining(character)
+        )
+        return re.findall(r"[a-z0-9]+", unaccented)
+
+    question_words = normalize_words(question)
+    normalized_question = " ".join(question_words)
     question_text = f" {normalized_question} "
     matches = []
 
     for document in documents:
         document_stem = Path(document["name"]).stem
-        normalized_stem = re.sub(
-            r"[^a-z0-9]+", " ", document_stem.casefold()
-        ).strip()
-        if normalized_stem and f" {normalized_stem} " in question_text:
+        document_words = normalize_words(document_stem)
+        complete_name_matches = (
+            " ".join(document_words) in question_text
+            if document_words
+            else False
+        )
+        distinctive_word_matches = any(
+            len(query_word) >= 4
+            and any(file_word.startswith(query_word) for file_word in document_words)
+            for query_word in question_words
+        )
+        if complete_name_matches or distinctive_word_matches:
             matches.append(document)
 
     return matches
 
 
 def _format_size(size: int | None) -> str:
+    """Convert a file size in bytes to a readable label."""
     if size is None:
         return "Size unavailable"
     if size < 1024:
@@ -447,6 +517,7 @@ def _format_size(size: int | None) -> str:
 def _save_uploaded_files(
     uploaded_files: list, folder: str
 ) -> tuple[list[str], list[str], list[str]]:
+    """Save supported uploads and report saved, unchanged, and failed files."""
     saved = []
     unchanged = []
     errors = []
@@ -484,6 +555,7 @@ def _save_uploaded_files(
 
 
 def _delete_document_file(filename: str, folder: str) -> tuple[bool, str | None]:
+    """Delete one document from the configured folder and report any failure."""
     if not filename:
         return False, "No file name was provided for deletion."
 
@@ -500,6 +572,7 @@ def _delete_document_file(filename: str, folder: str) -> tuple[bool, str | None]
 
 
 def _render_sources(chunk_details: list[dict]) -> None:
+    """Show retrieved passages and citations below an assistant answer."""
     if not chunk_details:
         return
 
@@ -538,10 +611,11 @@ def _requested_export_format(question: str) -> str | None:
 
 
 def _requests_full_conversation_export(question: str) -> bool:
+    """Detect whether the user asked to export the entire chat transcript."""
     normalized_question = question.casefold()
     return bool(
         re.search(
-            r"\b(?:all|entire|complete|whole)\s+(?:the\s+)?"
+            r"\b(?:all|entire|complete|whole|full)\s+(?:the\s+)?"
             r"(?:chat|conversation|chat history|conversation history|"
             r"messages|answers|responses)\b",
             normalized_question,
@@ -554,6 +628,37 @@ def _requests_full_conversation_export(question: str) -> bool:
     )
 
 
+def _requested_answer_count(question: str) -> int | None:
+    """Read a requested count from phrases such as 'last three answers'."""
+    normalized_question = question.casefold()
+    number_words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    match = re.search(
+        r"\blast\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+        r"\s+(?:assistant\s+)?(?:answers?|responses?|replies?)\b",
+        normalized_question,
+    )
+    if not match:
+        return None
+    matched_number = match.group(1)
+    count = (
+        number_words[matched_number]
+        if matched_number in number_words
+        else int(matched_number)
+    )
+    return count if count > 0 else None
+
+
 def _latest_export_content(messages: list[dict]) -> str | None:
     """Use the latest successful answer, preserving its text across file requests."""
     for message in reversed(messages):
@@ -561,9 +666,47 @@ def _latest_export_content(messages: list[dict]) -> str | None:
             message.get("role") == "assistant"
             and not message.get("is_error")
             and not message.get("is_file_notice")
+            and not message.get("generated_file")
         ):
-            return message.get("export_content", message["content"])
+            content = message.get("export_content", message.get("content"))
+            return content if isinstance(content, str) and content.strip() else None
     return None
+
+
+def _recent_answers_export_content(
+    messages: list[dict], answer_count: int
+) -> tuple[str | None, int]:
+    """Format up to the requested number of successful answers and citations."""
+    answers = []
+    for message in reversed(messages):
+        if (
+            message.get("role") != "assistant"
+            or message.get("is_error")
+            or message.get("is_file_notice")
+            or message.get("generated_file")
+        ):
+            continue
+
+        content = message.get("export_content", message.get("content"))
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        answer = f"AdhivAI answer:\n{content.strip()}"
+        citations = list(
+            dict.fromkeys(
+                chunk.get("citation") or chunk.get("source")
+                for chunk in message.get("chunk_details", [])
+                if chunk.get("citation") or chunk.get("source")
+            )
+        )
+        if citations:
+            answer += f"\nSources: {', '.join(citations)}"
+        answers.append(answer)
+        if len(answers) == answer_count:
+            break
+
+    answers.reverse()
+    return ("\n\n".join(answers) if answers else None, len(answers))
 
 
 def _conversation_export_content(messages: list[dict]) -> str | None:
@@ -604,6 +747,7 @@ def _adjust_stepper(
     maximum: int | float,
     step: int | float,
 ) -> None:
+    """Change a settings value by one step without crossing its allowed limits."""
     updated = min(maximum, max(minimum, st.session_state[key] + delta))
     st.session_state[key] = round(updated, 1) if isinstance(step, float) else updated
 
@@ -616,6 +760,7 @@ def _render_stepper(
     step: int | float,
     help_text: str,
 ) -> None:
+    """Display a minus/value/plus control for a bounded numeric setting."""
     with st.container(border=True):
         st.markdown(f"**{label}**")
         st.caption(help_text)
@@ -643,7 +788,7 @@ def _render_stepper(
             args=(key, step, minimum, maximum, step),
         )
 
-
+# Step 4: Initialize per-session values and inspect the shared document folder.
 _initialize_session_state()
 
 try:
@@ -656,6 +801,7 @@ question_count = sum(
     message.get("role") == "user" for message in st.session_state.messages
 )
 
+# Step 5: Render shared navigation, conversation actions, settings, and branding.
 with st.sidebar:
     st.markdown(
         """
@@ -771,6 +917,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
+# Step 6: Show the heading and prepare active model/index settings.
 st.markdown(
     """
     <div class="adhiv-hero">
@@ -790,6 +937,7 @@ active_config = {
     "top_k": st.session_state.active_top_k,
 }
 
+# Step 7: Prepare the answer model and synchronize the document search index.
 chain_signature = (
     active_config["model_name"],
     active_config["llm_temperature"],
@@ -887,6 +1035,7 @@ if (
         st.session_state.index_status = "error"
         st.session_state.index_error = _safe_error(exc, CONFIG["groq_api_key"])
 
+# Step 8: Report setup status and show workspace navigation.
 if setup_status is not None:
     setup_failed = bool(
         (needs_chain_setup and st.session_state.chain_error)
@@ -964,16 +1113,19 @@ if st.session_state.setup_timings:
 with st.container(key="workspace-navigation", border=True):
     selected_workspace = st.segmented_control(
         "Workspace section",
-        options=["Chat", "Knowledge base"],
-        format_func=lambda section: (
-            "🤖 Chat" if section == "Chat" else "📚 Knowledge base"
-        ),
+        options=["Chat", "Knowledge base", "Explore AdhivAI"],
+        format_func=lambda section: {
+            "Chat": ":material/chat: Chat",
+            "Knowledge base": ":material/folder_open: Knowledge base",
+            "Explore AdhivAI": ":material/explore: Explore AdhivAI",
+        }[section],
         default="Chat",
         key="selected_workspace",
         label_visibility="collapsed",
         width="content",
     )
 
+# Step 9: Render document management when Knowledge base is selected.
 if selected_workspace == "Knowledge base":
     st.markdown(
         '<div class="adhiv-eyebrow">Your workspace</div>',
@@ -990,7 +1142,10 @@ if selected_workspace == "Knowledge base":
             "Select document(s)",
             type=[extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS],
             accept_multiple_files=True,
-            help="Text-based PDFs are supported. Scanned PDFs require OCR.",
+            help=(
+                "Supports TXT, Markdown, text-based PDF, and Excel workbooks. "
+                "Scanned PDFs require OCR."
+            ),
             key=f"document_uploader_{st.session_state.document_uploader_version}",
         )
         if st.button(
@@ -1175,6 +1330,11 @@ if selected_workspace == "Knowledge base":
             "Scanned PDFs need OCR before their content can be searched."
         )
 
+# Step 10: Show the interactive product guide when Explore AdhivAI is selected.
+elif selected_workspace == "Explore AdhivAI":
+    render_explore_adhivai()
+
+# Step 11: Show chat history and handle questions in the Chat workspace.
 else:
     st.markdown('<div class="adhiv-eyebrow">AdhivAI</div>', unsafe_allow_html=True)
 
@@ -1195,7 +1355,7 @@ else:
             document_questions = (
                 ("Summarize the key points in my documents", ":material/summarize:"),
                 (
-                    "Summarize my experience and key skills from my résumé",
+                    "Summarize my experience and key skills from my resume",
                     ":material/description:",
                 ),
             )
@@ -1219,6 +1379,7 @@ else:
             ):
                 suggested_question = general_question
 
+    # Replay saved messages because Streamlit redraws the page on every rerun.
     for message_index, message in enumerate(st.session_state.messages):
         with st.chat_message(
             message["role"],
@@ -1230,6 +1391,8 @@ else:
                 st.info(message["content"])
             else:
                 st.markdown(message["content"])
+            if message["role"] == "assistant" and message.get("answer_mode"):
+                st.caption(f"Answer mode: {message['answer_mode']}")
             if message.get("retrieval_notice"):
                 st.warning(message["retrieval_notice"])
             if message["role"] == "assistant":
@@ -1253,35 +1416,62 @@ else:
                     )
 
     st.markdown("#### ✦ Ask AdhivAI...")
+    answer_mode = render_answer_mode_selector()
     typed_question = st.chat_input(
         "Type your question here",
         key="adhiv_chat_input",
     )
     question = suggested_question or typed_question
 
+    # Step 12: Process a question, then rerun to display the saved response.
     if question and question.strip():
         question = question.strip()
-        st.session_state.messages.append({"role": "user", "content": question})
+        st.session_state.messages.append(
+            {
+                "role": "user",
+                "content": question,
+                "answer_mode": answer_mode,
+            }
+        )
         with st.chat_message("user", avatar="🧑"):
             st.markdown(question)
 
         with st.chat_message("assistant", avatar="🤖"):
             export_format = _requested_export_format(question)
+            # File requests use prior messages and skip document retrieval.
             if export_format:
                 try:
                     prior_messages = st.session_state.messages[:-1]
                     full_conversation = _requests_full_conversation_export(question)
+                    answer_count = (
+                        None
+                        if full_conversation
+                        else _requested_answer_count(question)
+                    )
                     if full_conversation:
                         export_content = _conversation_export_content(prior_messages)
+                        exported_answer_count = None
+                    elif answer_count is not None:
+                        export_content, exported_answer_count = (
+                            _recent_answers_export_content(
+                                prior_messages, answer_count
+                            )
+                        )
                     else:
                         # A file request refers to the latest answer unless the
-                        # user explicitly asks for the full conversation.
+                        # user asks for a range or the full conversation.
                         export_content = _latest_export_content(prior_messages)
+                        exported_answer_count = None
                     if export_content is None:
                         if full_conversation:
                             response = (
                                 "Have a conversation first, then request a TXT "
                                 "or PDF export of the full chat."
+                            )
+                        elif answer_count is not None:
+                            response = (
+                                "There are no previous answers to include in "
+                                "that TXT or PDF export."
                             )
                         else:
                             response = (
@@ -1300,13 +1490,28 @@ else:
                         file_data, file_name, mime_type = create_export_file(
                             export_content,
                             export_format,
-                            is_conversation=full_conversation,
+                            is_conversation=(
+                                full_conversation or answer_count is not None
+                            ),
                         )
-                        scope = (
-                            "the full conversation"
-                            if full_conversation
-                            else "my previous answer"
-                        )
+                        if full_conversation:
+                            scope = "the full conversation"
+                        elif answer_count is not None:
+                            answer_label = (
+                                "answer"
+                                if exported_answer_count == 1
+                                else "answers"
+                            )
+                            scope = (
+                                f"the last {exported_answer_count} {answer_label}"
+                            )
+                            if exported_answer_count < answer_count:
+                                scope += (
+                                    f" ({answer_count} requested; "
+                                    f"{exported_answer_count} available)"
+                                )
+                        else:
+                            scope = "my previous answer"
                         response = f"Created **{file_name}** from {scope}."
                         st.markdown(response)
                         st.session_state.messages.append(
@@ -1345,84 +1550,135 @@ else:
                         "retrieval_seconds": 0.0,
                         "generation_seconds": 0.0,
                     }
-                    document_matches = _find_document_matches(
-                        question, document_files
-                    )
-                    with st.spinner("AdhivAI is searching for your answer..."):
+                    conversation_history = [
+                        {
+                            "role": message["role"],
+                            "content": message["content"],
+                        }
+                        for message in st.session_state.messages[:-1]
+                        if message.get("role") in {"user", "assistant"}
+                        and isinstance(message.get("content"), str)
+                        and message["content"].strip()
+                        and not message.get("is_error")
+                        and not message.get("is_file_notice")
+                        and not message.get("generated_file")
+                    ][-6:]
+                    with st.spinner("AdhivAI is preparing your answer..."):
                         retrieval_started = time.perf_counter()
-                        if len(document_matches) > 1:
-                            matching_names = ", ".join(
-                                f"**{document['name']}**"
-                                for document in document_matches
+                        retrieval_question = question
+                        if answer_mode != AI_ONLY:
+                            # Clarify follow-ups before matching files or searching.
+                            if st.session_state.chain is not None:
+                                retrieval_question = contextualize_question(
+                                    question,
+                                    conversation_history,
+                                    st.session_state.chain,
+                                )
+                            document_matches = _find_document_matches(
+                                retrieval_question, document_files
                             )
-                            answer = (
-                                "I found multiple documents matching that name: "
-                                f"{matching_names}. Please mention the full file name."
-                            )
-                        elif st.session_state.index_status == "ready":
-                            try:
-                                if st.session_state.retriever is None:
-                                    st.session_state.retriever = load_retriever(
-                                        active_config
-                                    )
-                                source_path = None
-                                if document_matches:
-                                    source_path = os.path.normcase(
-                                        os.path.abspath(
-                                            os.path.join(
-                                                CONFIG["documents_folder"],
-                                                document_matches[0]["name"],
+                            if len(document_matches) > 1:
+                                matching_names = ", ".join(
+                                    f"**{document['name']}**"
+                                    for document in document_matches
+                                )
+                                answer = (
+                                    "I found multiple documents matching that name: "
+                                    f"{matching_names}. Please mention the full file name."
+                                )
+                            elif st.session_state.index_status == "ready":
+                                try:
+                                    if st.session_state.retriever is None:
+                                        st.session_state.retriever = load_retriever(
+                                            active_config
+                                        )
+                                    source_path = None
+                                    if document_matches:
+                                        source_path = os.path.normcase(
+                                            os.path.abspath(
+                                                os.path.join(
+                                                    CONFIG["documents_folder"],
+                                                    document_matches[0]["name"],
+                                                )
                                             )
                                         )
+                                    chunks, sources, chunk_details = retrieve(
+                                        retrieval_question,
+                                        st.session_state.retriever,
+                                        active_config,
+                                        source_path=source_path,
                                     )
-                                chunks, sources, chunk_details = retrieve(
-                                    question,
-                                    st.session_state.retriever,
-                                    active_config,
-                                    source_path=source_path,
-                                )
-                                if source_path and not chunks:
-                                    answer = (
-                                        f"I found **{document_matches[0]['name']}**, "
-                                        "but it has no readable indexed text. "
-                                        "It may need to be synced, or the PDF may "
-                                        "be scanned and require OCR."
-                                    )
-                            except Exception as exc:
-                                st.session_state.retriever = None
+                                    if source_path and not chunks:
+                                        answer = (
+                                            f"I found **{document_matches[0]['name']}**, "
+                                            "but it has no readable indexed text. "
+                                            "It may need to be synced, or the PDF may "
+                                            "be scanned and require OCR."
+                                        )
+                                except Exception as exc:
+                                    st.session_state.retriever = None
+                                    if document_matches:
+                                        answer = (
+                                            f"I couldn't search **{document_matches[0]['name']}**. "
+                                            + _safe_error(exc, CONFIG["groq_api_key"])
+                                        )
+                                    else:
+                                        knowledge_base_error = (
+                                            "The knowledge base could not be searched. "
+                                            + _safe_error(exc, CONFIG["groq_api_key"])
+                                        )
+                                        retrieval_notice = (
+                                            knowledge_base_error
+                                            if answer_mode == KNOWLEDGE_BASE_ONLY
+                                            else knowledge_base_error
+                                            + " This answer uses general knowledge only."
+                                        )
+                            else:
                                 if document_matches:
                                     answer = (
-                                        f"I couldn't search **{document_matches[0]['name']}**. "
-                                        + _safe_error(exc, CONFIG["groq_api_key"])
+                                        f"I found **{document_matches[0]['name']}**, "
+                                        "but the knowledge base is not ready to search "
+                                        "it yet. Please try again after indexing finishes."
                                     )
                                 else:
-                                    retrieval_notice = (
-                                        "The knowledge base could not be searched, so "
-                                        "this answer uses general knowledge only. "
-                                        + _safe_error(exc, CONFIG["groq_api_key"])
+                                    knowledge_base_error = (
+                                        "The knowledge base is not ready to search."
                                     )
-                        else:
-                            if document_matches:
-                                answer = (
-                                    f"I found **{document_matches[0]['name']}**, "
-                                    "but the knowledge base is not ready to search "
-                                    "it yet. Please try again after indexing finishes."
-                                )
-                            else:
-                                retrieval_notice = (
-                                    "The knowledge base is not ready, so this answer "
-                                    "uses general knowledge only."
-                                )
-                                if st.session_state.index_error:
-                                    retrieval_notice += (
-                                        f" Index status: "
-                                        f"{st.session_state.index_error}"
+                                    if st.session_state.index_error:
+                                        knowledge_base_error += (
+                                            f" Index status: "
+                                            f"{st.session_state.index_error}"
+                                        )
+                                    retrieval_notice = (
+                                        knowledge_base_error
+                                        if answer_mode == KNOWLEDGE_BASE_ONLY
+                                        else knowledge_base_error
+                                        + " This answer uses general knowledge only."
                                     )
 
                         answer_timings["retrieval_seconds"] = (
                             time.perf_counter() - retrieval_started
                         )
 
+                        if (
+                            answer_mode == KNOWLEDGE_BASE_ONLY
+                            and answer is None
+                            and not chunks
+                        ):
+                            if retrieval_notice:
+                                answer = (
+                                    "I couldn't search the knowledge base "
+                                    "successfully, so I can't answer this in "
+                                    "Knowledge Base only mode."
+                                )
+                            else:
+                                answer = (
+                                    "I couldn't find supporting passages in the "
+                                    "knowledge base, so I can't answer this in "
+                                    "Knowledge Base only mode."
+                                )
+
+                        # Use retrieved passages and history to generate the response.
                         if answer is None:
                             if st.session_state.chain is None:
                                 raise RuntimeError(
@@ -1432,7 +1688,11 @@ else:
 
                             generation_started = time.perf_counter()
                             answer = generate(
-                                question, chunks, st.session_state.chain
+                                question,
+                                chunks,
+                                st.session_state.chain,
+                                conversation_history,
+                                answer_mode,
                             )
                             answer_timings["generation_seconds"] = (
                                 time.perf_counter() - generation_started
@@ -1452,6 +1712,7 @@ else:
                         {
                             "role": "assistant",
                             "content": answer,
+                            "answer_mode": answer_mode,
                             "sources": sources,
                             "chunk_details": chunk_details,
                             "retrieval_notice": retrieval_notice,
@@ -1469,6 +1730,7 @@ else:
                         {
                             "role": "assistant",
                             "content": error_message,
+                            "answer_mode": answer_mode,
                             "sources": [],
                             "chunk_details": [],
                             "is_error": True,

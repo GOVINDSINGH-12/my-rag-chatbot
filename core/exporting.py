@@ -1,9 +1,11 @@
 """Create downloadable files from an assistant response or chat transcript."""
 
+# Step 1: Import helpers for building text and in-memory PDF files.
 from html import escape
 from io import BytesIO
 
 
+# Step 2: Convert content into the requested file format for Streamlit downloads.
 def create_export_file(
     content: str, file_format: str, *, is_conversation: bool = False
 ) -> tuple[bytes, str, str]:
@@ -15,6 +17,7 @@ def create_export_file(
     if file_format != "pdf":
         raise ValueError(f"Unsupported export format: {file_format}")
 
+    # Import the optional PDF dependency only when a PDF is requested.
     try:
         from reportlab.lib.pagesizes import letter
         from reportlab.lib.styles import getSampleStyleSheet
@@ -24,7 +27,7 @@ def create_export_file(
             "PDF export needs ReportLab. Install dependencies from requirements.txt."
         ) from exc
 
-    # Escape model text before using ReportLab's paragraph markup parser.
+    # Escape model text before ReportLab interprets its paragraph markup.
     safe_content = escape(content).replace("\n", "<br/>")
     output = BytesIO()
     document = SimpleDocTemplate(

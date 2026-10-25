@@ -4,8 +4,10 @@ langchain-core
 langchain-groq
 langchain-huggingface
 langchain-text-splitters
+openpyxl
 pypdf
 python-dotenv
 reportlab>=4.0,<6
 sentence-transformers
+xlrd
 streamlit

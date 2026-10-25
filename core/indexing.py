@@ -11,9 +11,11 @@
 #       --> save a tracker matching the current folder
 # =============================================================================
 
+# Step 1: Import file, hashing, document-loading, splitting, and Chroma helpers.
 import hashlib
 import json
 import os
+from datetime import date, datetime
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import Chroma
@@ -24,9 +26,10 @@ from core.embeddings import get_embeddings
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACKER_PATH = os.path.join(BASE_DIR, "index_tracker.json")
-SUPPORTED_EXTENSIONS = (".txt", ".md", ".pdf")
+SUPPORTED_EXTENSIONS = (".txt", ".md", ".pdf", ".xls", ".xlsx")
 
 
+# Step 2: Normalize paths and load/hash files using consistent source metadata.
 def _normalized_path(filepath: str) -> str:
     """Make document paths comparable across Chroma metadata and the filesystem."""
     return os.path.normcase(os.path.abspath(filepath))
@@ -41,12 +44,120 @@ def _file_digest(filepath: str) -> str:
     return digest.hexdigest()
 
 
+def _format_cell_value(value: object) -> str:
+    """Convert spreadsheet cell values into readable text for document search."""
+    if value is None:
+        return ""
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def _spreadsheet_document(
+    filepath: str,
+    sheet_name: str,
+    rows: list[tuple],
+) -> Document:
+    """Use the first populated row as headers and preserve workbook/sheet metadata."""
+    source = _normalized_path(filepath)
+    populated_rows = [
+        (row_number, [_format_cell_value(value) for value in row])
+        for row_number, row in enumerate(rows, start=1)
+        if any(_format_cell_value(value) for value in row)
+    ]
+
+    if not populated_rows:
+        content = ""
+    else:
+        _, headers = populated_rows[0]
+        column_count = max(len(values) for _, values in populated_rows)
+        column_headers = [
+            (
+                headers[column_number - 1]
+                if column_number <= len(headers) and headers[column_number - 1]
+                else f"Column {column_number}"
+            )
+            for column_number in range(1, column_count + 1)
+        ]
+        lines = [
+            f"Worksheet: {sheet_name}",
+            "Columns: " + " | ".join(column_headers),
+        ]
+        for row_number, values in populated_rows[1:]:
+            cells = [
+                f"{column_headers[column_number - 1]}: {value}"
+                for column_number, value in enumerate(values, start=1)
+                if value
+            ]
+            if cells:
+                lines.append(f"Row {row_number}: " + " | ".join(cells))
+        content = "\n".join(lines)
+
+    return Document(
+        page_content=content,
+        metadata={"source": source, "sheet": sheet_name},
+    )
+
+
+def _load_xlsx(filepath: str) -> list[Document]:
+    """Read every .xlsx worksheet, using saved formula results when available."""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(filepath, read_only=True, data_only=True)
+    try:
+        return [
+            _spreadsheet_document(
+                filepath,
+                worksheet.title,
+                list(worksheet.iter_rows(values_only=True)),
+            )
+            for worksheet in workbook.worksheets
+        ]
+    finally:
+        workbook.close()
+
+
+def _load_xls(filepath: str) -> list[Document]:
+    """Read every worksheet in a legacy .xls workbook."""
+    import xlrd
+
+    workbook = xlrd.open_workbook(filepath, on_demand=True)
+    try:
+        documents = []
+        for worksheet in workbook.sheets():
+            rows = []
+            for row_number in range(worksheet.nrows):
+                values = []
+                for cell in worksheet.row(row_number):
+                    if cell.ctype == xlrd.XL_CELL_DATE:
+                        value = xlrd.xldate.xldate_as_datetime(
+                            cell.value, workbook.datemode
+                        )
+                    elif cell.ctype in {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}:
+                        value = None
+                    else:
+                        value = cell.value
+                    values.append(value)
+                rows.append(tuple(values))
+            documents.append(
+                _spreadsheet_document(filepath, worksheet.name, rows)
+            )
+        return documents
+    finally:
+        workbook.release_resources()
+
+
 def _load_document(filepath: str) -> list[Document]:
     """Load a supported file and normalize its source metadata for safe cleanup."""
     source = _normalized_path(filepath)
+    extension = os.path.splitext(filepath)[1].lower()
 
-    if os.path.splitext(filepath)[1].lower() == ".pdf":
+    if extension == ".pdf":
         documents = PyPDFLoader(filepath).load()
+    elif extension == ".xlsx":
+        return _load_xlsx(filepath)
+    elif extension == ".xls":
+        return _load_xls(filepath)
     else:
         documents = TextLoader(filepath, encoding="utf-8").load()
 
@@ -82,6 +193,7 @@ def build_index(config: dict) -> tuple[Chroma, list[str], list[str]]:
     Returns the vector store, changed/new filenames, and files without readable
     text. Old timestamp-only tracker entries are safely reindexed.
     """
+    # Step 3: Find supported files and connect to the configured Chroma collection.
     documents_folder = config["documents_folder"]
     os.makedirs(documents_folder, exist_ok=True)
 
@@ -101,6 +213,7 @@ def build_index(config: dict) -> tuple[Chroma, list[str], list[str]]:
         collection_name=config["collection_name"],
     )
 
+    # Step 4: Compare the current files with both the tracker and stored chunks.
     # Inspect indexed source metadata as well as the tracker. This detects a
     # manually cleared Chroma database even when the tracker still exists.
     stored_data = vectorstore.get(include=["metadatas"])
@@ -143,6 +256,7 @@ def build_index(config: dict) -> tuple[Chroma, list[str], list[str]]:
             files_to_index.append((filename, filepath))
             newly_indexed.append(filename)
 
+    # Step 5: Load changed documents and split their text into searchable chunks.
     sources_to_replace = {
         _normalized_path(filepath) for _, filepath in files_to_index
     }
@@ -171,6 +285,7 @@ def build_index(config: dict) -> tuple[Chroma, list[str], list[str]]:
                 chunk_counts[filename] += 1
                 break
 
+    # Step 6: Remove stale chunks, add replacements, then save the tracker.
     # Delete chunks whose source was removed, plus old chunks for changed files.
     # Deleting by stored IDs also handles legacy source-path formatting safely.
     ids_to_delete = ids_without_source + [
